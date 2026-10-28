@@ -3,7 +3,7 @@ name: Build SukiSU kernelsu.ko (LKM)
 # 目标：Sony Xperia 1 V (pdx234)
 # 系统：LineageOS 24.0 NIGHTLY (AOSP 17)
 # 内核：5.15.211-gdb39b3851f98 (GKI, commit db39b3851f98)
-# 方式：CONFIG_KSU=m，骞与内核 vermagic 完全匹配的 kernelsu.ko
+# 方式：CONFIG_KSU=m，产出与内核 vermagic 匹配的 kernelsu.ko
 
 on:
   workflow_dispatch:
@@ -14,8 +14,6 @@ env:
   KERNEL_REPO: https://github.com/LineageOS/android_kernel_sony_sm8550.git
   KERNEL_BRANCH: lineage-24.0
   SUKISU_REPO: https://github.com/SukiSU-Ultra/SukiSU-Ultra.git
-  # AOSP clang r596125 (与设备内核编译工具链一致)
-  CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r596125.tar.gz
 
 jobs:
   build:
@@ -36,15 +34,16 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential bc bison flex libssl-dev libelf-dev \
             zip unzip cpio rsync python3 perl git curl ca-certificates
+          # 确保有 clang/llvm（内核编译用 LLVM=1）
+          sudo apt-get install -y --no-install-recommends clang lld llvm
+          clang --version
+          ld.lld --version
 
-      - name: Download AOSP clang r596125
+      - name: Install newer clang from apt.llvm.org
         run: |
-          mkdir -p $RUNNER_TEMP/clang
-          curl -fsSL "$CLANG_URL" -o $RUNNER_TEMP/clang.tar.gz
-          tar -xzf $RUNNER_TEMP/clang.tar.gz -C $RUNNER_TEMP/clang
-          ls $RUNNER_TEMP/clang/bin/clang
-          $RUNNER_TEMP/clang/bin/clang --version
-          echo "$RUNNER_TEMP/clang/bin" >> $GITHUB_PATH
+          # Ubuntu 24.04 自带 clang 通常为 18，够用；若需要更高版本可在此替换
+          ls /usr/bin/clang* || true
+          echo "CC=clang" >> $GITHUB_ENV
 
       - name: Clone kernel (LineageOS 24.0)
         run: |
@@ -98,7 +97,7 @@ jobs:
           echo "--- 预期 vermagic 包含 5.15.211-gdb39b3851f98 ---"
           strings "$KO" | grep -m1 '5\.15\.211-gdb39b3851f98' \
             || echo "::error::vermagic 不匹配设备内核！"
-          $RUNNER_TEMP/clang/bin/llvm-strip -d "$KO" || true
+          # 不做 strip，保留符号与 __versions 段
 
       - name: Package artifact
         run: |
