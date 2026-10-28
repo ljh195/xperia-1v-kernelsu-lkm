@@ -1,0 +1,119 @@
+name: Build SukiSU kernelsu.ko (LKM)
+
+# 目标：Sony Xperia 1 V (pdx234)
+# 系统：LineageOS 24.0 NIGHTLY (AOSP 17)
+# 内核：5.15.211-gdb39b3851f98 (GKI, commit db39b3851f98)
+# 方式：CONFIG_KSU=m，骞与内核 vermagic 完全匹配的 kernelsu.ko
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+env:
+  KERNEL_REPO: https://github.com/LineageOS/android_kernel_sony_sm8550.git
+  KERNEL_BRANCH: lineage-24.0
+  SUKISU_REPO: https://github.com/SukiSU-Ultra/SukiSU-Ultra.git
+  # AOSP clang r596125 (与设备内核编译工具链一致)
+  CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r596125.tar.gz
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android/sdk/ndk 2>/dev/null || true
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            zip unzip cpio rsync python3 perl git curl ca-certificates
+
+      - name: Download AOSP clang r596125
+        run: |
+          mkdir -p $RUNNER_TEMP/clang
+          curl -fsSL "$CLANG_URL" -o $RUNNER_TEMP/clang.tar.gz
+          tar -xzf $RUNNER_TEMP/clang.tar.gz -C $RUNNER_TEMP/clang
+          ls $RUNNER_TEMP/clang/bin/clang
+          $RUNNER_TEMP/clang/bin/clang --version
+          echo "$RUNNER_TEMP/clang/bin" >> $GITHUB_PATH
+
+      - name: Clone kernel (LineageOS 24.0)
+        run: |
+          git clone --depth 1 --branch "$KERNEL_BRANCH" "$KERNEL_REPO" kernel
+          cd kernel
+          echo "HEAD: $(git rev-parse HEAD)"
+          head -5 Makefile
+          # 断言 commit 与设备一致
+          test "$(git rev-parse HEAD)" = "db39b3851f981d5ef933437758e662cfa272a007" \
+            || echo "::warning::HEAD commit differs from device kernel db39b3851f98"
+
+      - name: Apply SukiSU kernel patches
+        run: |
+          git clone --depth 1 "$SUKISU_REPO" sukisu
+          cd kernel
+          sh ../sukisu/kernel/setup.sh
+          ls -l drivers/kernelsu
+          grep -n kernelsu drivers/Makefile drivers/Kconfig
+
+      - name: Prepare kernel config
+        run: |
+          cd kernel
+          cp ../configs/pdx234_defconfig .config
+          # 打开 KSU (模块模式) 与手动 su
+          ./scripts/config --module KSU
+          ./scripts/config --enable KSU_MANUAL_SU
+          ./scripts/config --enable KSU_KPROBES 2>/dev/null || true
+          make ARCH=arm64 LLVM=1 olddefconfig
+          grep -E "^CONFIG_KSU|^CONFIG_KSU_MANUAL|^CONFIG_MODULE_SIG_FORCE|^CONFIG_MODVERSIONS" .config
+
+      - name: Build kernel (vmlinux) to produce Module.symvers
+        run: |
+          cd kernel
+          # CONFIG_MODVERSIONS=y 需要 Module.symvers 才能给模块正确的符号 CRC。
+          # modules_prepare 不生成符号表，必须真正编译出 vmlinux。
+          make ARCH=arm64 LLVM=1 -j$(nproc) vmlinux
+          ls -lh vmlinux Module.symvers
+
+      - name: Build kernelsu.ko
+        run: |
+          cd kernel
+          make ARCH=arm64 LLVM=1 -j$(nproc) M=drivers/kernelsu modules
+          find . -name 'kernelsu.ko' -exec ls -lh {} \;
+
+      - name: Verify module vermagic
+        run: |
+          cd kernel
+          KO=$(find . -name 'kernelsu.ko' | head -1)
+          echo "KO=$KO"
+          strings "$KO" | grep -m1 vermagic
+          echo "--- 预期 vermagic 包含 5.15.211-gdb39b3851f98 ---"
+          strings "$KO" | grep -m1 '5\.15\.211-gdb39b3851f98' \
+            || echo "::error::vermagic 不匹配设备内核！"
+          $RUNNER_TEMP/clang/bin/llvm-strip -d "$KO" || true
+
+      - name: Package artifact
+        run: |
+          cd kernel
+          KO=$(find . -name 'kernelsu.ko' | head -1)
+          mkdir -p ../out
+          cp "$KO" ../out/kernelsu-5.15.211-pdx234.ko
+          cd ../out
+          sha256sum kernelsu-5.15.211-pdx234.ko > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          ls -lh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernelsu-lkm-pdx234
+          path: out/
+          retention-days: 90
